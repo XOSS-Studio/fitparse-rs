@@ -259,7 +259,7 @@ fn convert_value(
             )));
         }
         FieldDataType::LocalDateTime => {
-            return Ok(Value::from(TimestampField::Local(
+            return Ok(Value::from(TimestampField::Utc(
                 value.try_into().unwrap_or(0),
             )));
         }
