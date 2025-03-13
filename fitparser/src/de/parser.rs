@@ -36,9 +36,8 @@ impl Value {
             Value::SInt64(val) => *val != 0x7FFF_FFFF_FFFF_FFFF,
             Value::UInt64(val) => *val != 0xFFFF_FFFF_FFFF_FFFF,
             Value::UInt64z(val) => *val != 0x0,
-            // TODO: I need to check this logic, since for Byte Arrays it's only invalid if
-            // all the values are invalid. Is that the case for all array fields or just "byte arrays"?
-            Value::Array(vals) => !vals.is_empty() && vals.iter().all(|v| v.is_valid()),
+            Value::Array(vals) => !vals.is_empty() && vals.iter().any(|v| v.is_valid()),
+            Value::Invalid => false,
         }
     }
 }
@@ -555,7 +554,7 @@ fn data_field_value(
 ) -> IResult<&[u8], Option<Value>> {
     let mut input = input;
     let mut bytes_consumed = 0;
-    let mut values: Vec<Value> = Vec::new();
+    let mut values: Vec<Value> = Vec::with_capacity((size / base_type.size()) as _);
 
     while bytes_consumed < size {
         let (i, value) = match base_type {
@@ -570,14 +569,11 @@ fn data_field_value(
                 // consume the field as defined by its size and then locate the first NUL byte
                 // and ignore everything after it when converting to a string
                 let (input, field_value) = take(size as usize)(input)?;
-                let mut value = Vec::new();
-                for char in field_value {
-                    if *char == 0u8 {
-                        break;
-                    }
-                    value.push(*char);
-                }
-                if let Ok(value) = String::from_utf8(value) {
+                let field_value = &field_value[0..field_value
+                    .iter()
+                    .position(|v| *v == 0u8)
+                    .unwrap_or(field_value.len())];
+                if let Ok(value) = String::from_utf8(field_value.to_owned()) {
                     return Ok((input, Some(Value::String(value))));
                 } else {
                     return Ok((input, None));
@@ -588,14 +584,18 @@ fn data_field_value(
             FitBaseType::Uint8z => le_u8(input).map(|(i, v)| (i, Value::UInt8z(v)))?,
             FitBaseType::Uint16z => u16(byte_order)(input).map(|(i, v)| (i, Value::UInt16z(v)))?,
             FitBaseType::Uint32z => u32(byte_order)(input).map(|(i, v)| (i, Value::UInt32z(v)))?,
-            FitBaseType::Byte => le_u8(input).map(|(i, v)| (i, Value::UInt8(v)))?,
+            FitBaseType::Byte => le_u8(input).map(|(i, v)| (i, Value::Byte(v)))?,
             FitBaseType::Sint64 => i64(byte_order)(input).map(|(i, v)| (i, Value::SInt64(v)))?,
             FitBaseType::Uint64 => u64(byte_order)(input).map(|(i, v)| (i, Value::UInt64(v)))?,
             FitBaseType::Uint64z => u64(byte_order)(input).map(|(i, v)| (i, Value::UInt64z(v)))?,
             _ => le_u8(input).map(|(i, v)| (i, Value::UInt8(v)))?, // Treat unexpected like Byte
         };
         bytes_consumed += base_type.size();
-        values.push(value);
+        if matches!(base_type, FitBaseType::Byte) || value.is_valid() {
+            values.push(value);
+        } else {
+            values.push(Value::Invalid)
+        }
         input = i;
     }
 
@@ -603,10 +603,11 @@ fn data_field_value(
     let value = if values.len() == 1 {
         values.swap_remove(0)
     } else {
+        values.shrink_to_fit();
         Value::Array(values)
     };
 
-    // Only return "something" if it's in the valid range
+    // Strip invalid values from the output
     if value.is_valid() {
         Ok((input, Some(value)))
     } else {
@@ -684,7 +685,7 @@ mod tests {
 
     #[test]
     fn data_field_value_test_array_value() {
-        let data = [0x00, 0x01, 0x02, 0x03, 0xFF];
+        let data = [0x00, 0x01, 0x02, 0x03, 0xFF, 0x05];
 
         // parse off a valid byte
         let (rem, val) =
@@ -701,20 +702,47 @@ mod tests {
             ),
             None => panic!("No value returned."),
         }
-        assert_eq!(rem, &[0xFF]);
+        assert_eq!(rem, &[0xFF, 0x05]);
 
         // parse off an invalid byte
         let (rem, val) =
-            data_field_value(&data, FitBaseType::Uint8, Endianness::Native, 5).unwrap();
-        if val.is_some() {
-            panic!("None should be returned for invalid bytes.")
+            data_field_value(&data, FitBaseType::Uint8, Endianness::Native, 6).unwrap();
+        match val {
+            Some(v) => assert_eq!(
+                v,
+                Value::Array(vec![
+                    Value::UInt8(0x00),
+                    Value::UInt8(0x01),
+                    Value::UInt8(0x02),
+                    Value::UInt8(0x03),
+                    Value::Invalid,
+                    Value::UInt8(0x05),
+                ])
+            ),
+            None => panic!("No value returned."),
         }
         assert_eq!(rem, &[]);
+    }
 
-        if val.is_some() {
-            panic!("None should be returned for array with an invalid size.")
+    #[test]
+    fn data_field_value_test_byte_array_value() {
+        let data = [0xFF, 0x01, 0xFF, 0x03, 0xFF, 0x05];
+
+        // parse off a valid byte array containing 0xFF bytes
+        let (rem, val) = data_field_value(&data, FitBaseType::Byte, Endianness::Native, 4).unwrap();
+        match val {
+            Some(v) => assert_eq!(
+                v,
+                Value::Array(vec![
+                    Value::Byte(0xFF),
+                    Value::Byte(0x01),
+                    Value::Byte(0xFF),
+                    Value::Byte(0x03),
+                ])
+            ),
+            None => panic!("No value returned."),
         }
-        assert_eq!(rem, &[]);
+        assert_eq!(rem, &[0xFF, 0x05]);
     }
 
     #[test]
@@ -758,5 +786,29 @@ mod tests {
         match data_field_value(&data, FitBaseType::Uint16, Endianness::Native, 255) {
             Ok(..) | Err(..) => {}
         };
+    }
+
+    #[test]
+    fn value_array_is_valid() {
+        let val = Value::Array(vec![Value::UInt8(0xFF), Value::UInt8(42u8)]);
+        assert!(
+            val.is_valid(),
+            "This Value array should be valid since it contains a valid value"
+        );
+        let val = Value::Array(vec![Value::Invalid, Value::UInt8(42u8)]);
+        assert!(
+            val.is_valid(),
+            "This Value array should be valid since it contains a valid value"
+        );
+        let val = Value::Array(vec![Value::UInt8(0x00), Value::UInt8(42u8)]);
+        assert!(
+            val.is_valid(),
+            "This Value array should be valid since it contains only valid values"
+        );
+        let val = Value::Array(vec![Value::Byte(0xFF), Value::Byte(0xFF)]);
+        assert!(
+            !val.is_valid(),
+            "This Value array should be invalid since it contains no valid values"
+        );
     }
 }

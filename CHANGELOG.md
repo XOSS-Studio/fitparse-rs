@@ -1,8 +1,13 @@
 # Changelog
 
-## HEAD
-* Bump packaged FIT SDK version to 21.141.00 (lingepumpe)
+## v0.9.0
+* Improve support for array handling (mat-kie)
+* Fix parsing of Byte arrays (mat-kie)
+* Bump packaged FIT SDK version to 21.158.00
 
+## v0.8.0
+* Bump packaged FIT SDK version to 21.141.00 (lingepumpe)
+* Implement developer field data parsing (lingepumpe)
 
 ## v0.7.0
 * Bump packaged FIT SDK version to 21.133.00 (robinkrahl)

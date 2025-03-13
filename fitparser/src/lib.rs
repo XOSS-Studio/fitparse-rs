@@ -201,6 +201,8 @@ pub enum Value {
     /// Array of Values, while this allows nested arrays and mixed types this is not possible
     /// in a properly formatted FIT file
     Array(Vec<Self>),
+    /// Placeholder for invalid values in output
+    Invalid,
 }
 
 impl fmt::Display for Value {
@@ -224,7 +226,8 @@ impl fmt::Display for Value {
             Value::Float32(val) => write!(f, "{}", val),
             Value::Float64(val) => write!(f, "{}", val),
             Value::String(val) => write!(f, "{}", val),
-            Value::Array(vals) => write!(f, "{:?}", vals), // printing arrays is hard
+            Value::Array(vals) => write!(f, "{:?}", vals), // printing arrays is hard,
+            Value::Invalid => write!(f, ""),
         }
     }
 }
@@ -257,6 +260,10 @@ impl convert::TryInto<f64> for Value {
             Value::Array(_) => {
                 Err(ErrorKind::ValueError(format!("cannot convert {} into an f64", self)).into())
             }
+            Value::Invalid => Err(ErrorKind::ValueError(
+                "cannot convert an invalid value into an f64".to_string(),
+            )
+            .into()),
         }
     }
 }
@@ -293,6 +300,10 @@ impl convert::TryInto<i64> for Value {
             Value::Array(_) => {
                 Err(ErrorKind::ValueError(format!("cannot convert {} into an i64", self)).into())
             }
+            Value::Invalid => Err(ErrorKind::ValueError(
+                "cannot convert an invalid value into an i64".to_string(),
+            )
+            .into()),
         }
     }
 }
@@ -329,6 +340,10 @@ impl convert::TryInto<i64> for &Value {
             Value::Array(_) => {
                 Err(ErrorKind::ValueError(format!("cannot convert {} into an i64", self)).into())
             }
+            Value::Invalid => Err(ErrorKind::ValueError(
+                "cannot convert an invalid value into an i64".to_string(),
+            )
+            .into()),
         }
     }
 }
@@ -568,6 +583,34 @@ mod tests {
         let data = include_bytes!("../tests/fixtures/sample_mulitple_header.fit").to_vec();
         let fit_data = from_bytes(&data).unwrap();
         assert_eq!(fit_data.len(), 3023);
+    }
+
+    #[test]
+    fn parse_activity_with_hrv() {
+        // this test case includes a chained FIT file
+        let data = include_bytes!("../tests/fixtures/hrv-activity.fit").to_vec();
+        let fit_data = from_bytes(&data).unwrap();
+        assert_eq!(fit_data.len(), 2260);
+        // find the first HRV message and check the array
+        // we should see a partial set of bytes
+        let field = fit_data
+            .into_iter()
+            .find(|rec| rec.kind == profile::MesgNum::Hrv)
+            .map(|rec| rec.fields)
+            .expect("We should have at least one HRV message")
+            .into_iter()
+            .find(|fld| fld.name == "time")
+            .expect("We should have at least one time field");
+        assert_eq!(
+            field.value,
+            Value::Array(vec![
+                Value::Float64(0.467),
+                Value::Float64(0.464),
+                Value::Invalid,
+                Value::Invalid,
+                Value::Invalid
+            ])
+        );
     }
 
     #[test]
